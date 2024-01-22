@@ -1,48 +1,40 @@
 import torch
 import torch.nn as nn
-from torchvision.models.resnet import resnet18, resnet34, resnet50, resnet101
-from torchvision.models.resnet import resnet18, resnet34, resnet50, resnet101
-from torchvision.models import convnext_tiny
-from torchvision.models import convnext_small
-from torchvision.models import convnext_base
-from torchvision.models import convnext_large
+from torchvision.models import convnext_tiny, convnext_small, convnext_base, convnext_large
+from .resnet import ResNet
 
 
-class MenteeVisionModel(nn.Module):
+class ConvModel(nn.Module):
     def __init__(self, name, out_dim=768, hidden_dim=256):
-        super(MenteeVisionModel, self).__init__()
+        super(ConvModel, self).__init__()
         if name =='resnet18':
-            backbone = resnet18(pretrained=True)
+            subset_model = ResNet(order='18', pretrained=True)
             z_dim = 256
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-3])
         elif name =='resnet34':
-            backbone = resnet34(pretrained=True)
+            subset_model = ResNet(order='34', pretrained=True)
             z_dim = 256
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-3])
         elif name =='resnet50':
-            backbone = resnet50(pretrained=True)
+            subset_model = ResNet(order='50', pretrained=True)
             z_dim = 1024
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-3])
         elif name =='resnet101':
-            backbone = resnet101(pretrained=True)
+            subset_model = ResNet(order='101', pretrained=True)
             z_dim = 1024
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-3])
         elif name =='convnext_tiny':
-            backbone = list(convnext_tiny().children())[0]
+            backbone = convnext_tiny()
             z_dim = 384
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-2])
+            subset_model = torch.nn.Sequential(*list(backbone.features[:-2]))
         elif name =='convnext_small':
-            backbone = list(convnext_small().children())[0]
+            backbone = convnext_small()
             z_dim = 384
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-2])
+            subset_model = torch.nn.Sequential(*list(backbone.features[:-2]))
         elif name =='convnext_base':
-            backbone = list(convnext_base().children())[0]
+            backbone = convnext_base()
             z_dim = 512
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-2])
+            subset_model = torch.nn.Sequential(*list(backbone.features[:-2]))
         elif name =='convnext_large':
-            backbone = list(convnext_large().children())[0]
+            backbone = convnext_large()
             z_dim = 768
-            subset_model = torch.nn.Sequential(*list(backbone.children())[:-2])
+            subset_model = torch.nn.Sequential(*list(backbone.features[:-2]))
         
         projection_layer = nn.Conv2d(z_dim, out_dim, kernel_size=1)
         torch.nn.init.xavier_uniform_(projection_layer.weight)
@@ -62,3 +54,14 @@ class MenteeVisionModel(nn.Module):
         last_hidden_state = torch.cat([class_embeds, patch_embeds], dim=1)
         return last_hidden_state
     
+
+if __name__ == "__main__":
+    import time
+    input_tensor = torch.randn((1, 3, 960, 960)).cuda().half()
+    custom_resnet = ConvModel(name='convnext_large').cuda().eval().half()
+
+    for i in range(10000):
+        start = time.time()
+        output = custom_resnet(input_tensor)
+        # nn.functional.gelu(input_tensor)
+        print(1000*(time.time() - start))
