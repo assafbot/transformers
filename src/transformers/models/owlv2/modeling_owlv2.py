@@ -1084,7 +1084,9 @@ class Owlv2Model(Owlv2PreTrainedModel):
         self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
 
-        self.text_model = Owlv2TextTransformer(text_config)
+        self.text_model = Owlv2TextTransformer(text_config) 
+        if not hasattr(vision_config, 'name'):
+           vision_config.name = "vit"
         if vision_config.name == 'vit':
             self.vision_model = Owlv2VisionTransformer(vision_config)
         else:
