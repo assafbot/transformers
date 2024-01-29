@@ -85,7 +85,8 @@ class EvaluationDataset(Dataset):
         return d_text, d_bbox, d_image_id, d_category_id
 
     def __len__(self):
-        return self.Nimages
+        return 180
+        # return self.Nimages
 
     def __getitem__(self, idx):
         image_path = self.files[idx]
@@ -116,6 +117,11 @@ class Owlv2DisTrainer:
         self.bce_criterion = nn.BCELoss()
         self.folder = folder
         self._set_config_file()
+        self.device = args.device
+        if args.dtype == 'float16':
+            self.dtype = torch.float16
+        else:
+            self.dtype = torch.float32
         self._init_teacher()
         self._init_student()
         self.optimizer = optim.AdamW(self.student.owlv2.vision_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -124,6 +130,9 @@ class Owlv2DisTrainer:
         self.epoches = args.epoches
         self.threshold = args.th
         self._init_results_files()
+        self.second_stage_flag = False
+        self.final_stage_flag = False
+        
 
     def _set_config_file(self):
         config = Owlv2Config()
@@ -132,15 +141,20 @@ class Owlv2DisTrainer:
         config.vision_config.intermediate_size = args.intermediate_size
         config.vision_config.name = args.name
         config.vision_config.image_size = 960
-        self.save_config_json(args, self.folder)
+        self._save_config_json()
         self.config = config
+    
+    def _save_config_json(self):
+        conf_dict = vars(self.args)
+        with open(self.folder + '/config.json', 'w') as f:
+            json.dump(conf_dict, f)
 
     def _init_teacher(self):
-        self.teacher = Owlv2ForObjectDetection.from_pretrained(self.args.teacher).cuda().eval()
+        self.teacher = Owlv2ForObjectDetection.from_pretrained(self.args.teacher).to(self.device).eval()
         self.processor = Owlv2Processor.from_pretrained(self.args.teacher)
 
     def _init_student(self):
-        self.student = Owlv2ForObjectDetection(config=self.config)
+        self.student = Owlv2ForObjectDetection(config=self.config).to(self.device)
         if args.resume == 1:
             cp = torch.load(args.resume_path + '/model.pth').state_dict()
             self.student.load_state_dict(cp, strict=True)
@@ -148,18 +162,14 @@ class Owlv2DisTrainer:
             self.student.load_state_dict(self.teacher.state_dict(), strict=False)
         for param in self.student.parameters():
             param.requires_grad = False
-        if args.name == 'vit':
-            for param in self.student.owlv2.vision_model.parameters():
-                param.requires_grad = True
-        else:
-            for param in self.student.owlv2.vision_model.parameters():
-                param.requires_grad = True
+        for param in self.student.owlv2.vision_model.parameters():
+            param.requires_grad = True
 
     def _init_results_files(self):
         self.predictions_path = self.folder + '/prediction.json'
         self.ground_truth_path = args.validation_ann_path
         self.f = open(self.folder + '/best.csv', 'w')
-        self.f = self.save_args_to_file(args, self.f)
+        self.save_args_to_file()
         self.f.write('ep,score\n')
         self.f.flush()
 
@@ -170,12 +180,18 @@ class Owlv2DisTrainer:
         os.makedirs(folder_name)
         return folder_name
 
-    def set_inputs_device(self, inputs, device=torch.cuda):
-        inputs['input_ids'] = inputs['input_ids'].to(device).squeeze(dim=1).detach()
-        inputs['pixel_values'] = inputs['pixel_values'].to(device).squeeze(dim=1).detach()
-        inputs['attention_mask'] = inputs['attention_mask'].to(device).squeeze(dim=1).detach()
+    def set_inputs_device(self, inputs):
+        inputs['input_ids'] = inputs['input_ids'].to(self.device).squeeze(dim=1).detach()
+        inputs['pixel_values'] = inputs['pixel_values'].to(self.device).squeeze(dim=1).detach()
+        inputs['attention_mask'] = inputs['attention_mask'].to(self.device).squeeze(dim=1).detach()
         return inputs
 
+    def set_validation_inputs_device(self, inputs):
+        inputs['input_ids'] = inputs['input_ids'].to(self.device).squeeze(dim=0).detach()
+        inputs['pixel_values'] = inputs['pixel_values'].to(self.device).squeeze(dim=1).detach()
+        inputs['attention_mask'] = inputs['attention_mask'].to(self.device).squeeze(dim=0).detach()
+        return inputs
+    
     def save_prediction(self, predictions):
         with open(self.predictions_path, 'w') as json_file:
                 json.dump(predictions, json_file)
@@ -187,7 +203,7 @@ class Owlv2DisTrainer:
 
     def get_teacher_outputs(self, inputs):
         with torch.no_grad():
-            teacher_outputs = self.teacher_model(**inputs)
+            teacher_outputs = self.teacher(**inputs)
             z_t = teacher_outputs['vision_model_output']['last_hidden_state'].detach()
             objectness_t = teacher_outputs['objectness_logits'].detach()
             objectness_probs_t = F.sigmoid(objectness_t).detach()
@@ -197,7 +213,7 @@ class Owlv2DisTrainer:
         return z_t, objectness_t, objectness_probs_t, logits_t, probs_t, boxes_t
     
     def get_student_outputs(self, inputs):
-        student_outputs = self.student_model(**inputs)
+        student_outputs = self.student(**inputs)
         z_s = student_outputs['vision_model_output']['last_hidden_state']
         objectness_s = student_outputs['objectness_logits']
         logits_s = student_outputs['logits']
@@ -209,7 +225,7 @@ class Owlv2DisTrainer:
     
     def head_loss(self, s, t, prob):
         loss = self.mse_criterion(s, t)
-        if self.pos_flag:
+        if self.last_stage_flag:
             mask = (prob > self.threshold).squeeze()
             pos_loss = self.mse_criterion(s[mask], t[mask])
             loss = pos_loss + self.args.alpha * loss
@@ -219,35 +235,46 @@ class Owlv2DisTrainer:
         z_t, objectness_t, objectness_probs_t, logits_t, probs_t, boxes_t = teacher_outputs
         z_s, objectness_s, logits_s, boxes_s = student_outputs
         z_loss = self.representation_loss(z_s, z_t) 
-        objectness_loss = self.head_loss(objectness_s, objectness_t, objectness_probs_t)
-        logits_loss = self.head_loss(logits_s, logits_t, probs_t)
-        bbox_loss = self.head_loss(boxes_s, boxes_t, objectness_probs_t)
-        loss = z_loss + self.args.w0*objectness_loss + self.args.w1*logits_loss + self.args.w2*bbox_loss
+        if self.second_stage_flag:
+            objectness_loss = self.head_loss(objectness_s, objectness_t, objectness_probs_t)
+            logits_loss = self.head_loss(logits_s, logits_t, probs_t)
+            bbox_loss = self.head_loss(boxes_s, boxes_t, objectness_probs_t)
+            loss = z_loss + self.args.w0*objectness_loss + self.args.w1*logits_loss + self.args.w2*bbox_loss
+        else:
+            loss = z_loss
         return loss
     
     def training_single_epoch(self):
         pbar = tqdm(self.training_ds)
         scaler = torch.cuda.amp.GradScaler(enabled=True)
         loss_list = []
+        self.student.train()
         for ix, (inputs) in enumerate(pbar):
             self.optimizer.zero_grad()
             inputs = self.set_inputs_device(inputs)
-            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=True):
+            with torch.amp.autocast(device_type=self.device, dtype=self.dtype, enabled=True):
                 teacher_outputs = self.get_teacher_outputs(inputs)
-                student_outputs = self.student_model(**inputs)
+                student_outputs = self.get_student_outputs(inputs)
                 loss = self.loss_function(student_outputs, teacher_outputs)
             scaler.scale(loss).backward()
             scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), 1)
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1)
             scaler.step(self.optimizer)
             scaler.update()
             loss_list.append(loss.item())
             loss_mean = np.mean(loss_list)
             pbar.set_description(f'Loss: {loss_mean:.4f}')               
 
+    def update_flags(self, ep):
+        if ep>= self.args.second_stage:
+            self.second_stage_flag = True
+        if ep>= self.args.last_stage:
+            self.last_stage_flag = True
+
     def training(self):
         best = 0.0
         for epoch in range(self.epoches):
+            self.update_flags(epoch)
             self.training_single_epoch()
             predictions = self.eval_ds()
             self.save_prediction(predictions)
@@ -262,9 +289,10 @@ class Owlv2DisTrainer:
     def eval_ds(self):
         pbar = tqdm(self.validation_ds)
         predictions = []     
+        self.student.eval()
         for ix, (inputs, gt_boxes, target_sizes, texts, image_id, category_id) in enumerate(pbar):
             texts = [texts[i][0] for i in range(len(texts))]
-            inputs = self.get_inputs(inputs, False)
+            inputs = self.set_validation_inputs_device(inputs)
             outputs = self.student(**inputs)
             results = self.get_output_results(outputs, target_sizes)
             results = self.op_nms(results)
@@ -315,6 +343,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='A simple script with command-line arguments.')
     parser.add_argument('--batch_size', type=int, default=3, help='')
+    parser.add_argument('--nW', type=int, default=3, help='')
     parser.add_argument('--teacher', type=str,default='google/owlv2-base-patch16-ensemble', help='')
     parser.add_argument('--num_attention_heads', type=int, default=8, help='')
     parser.add_argument('--num_hidden_layers', type=int, default=8, help='')
@@ -330,15 +359,19 @@ if __name__ == "__main__":
     parser.add_argument('--alpha', default=0.025, type=float, help='')
     parser.add_argument('--resume', default=0, type=int, help='')
     parser.add_argument('--resume_path', default='results/results_2024-01-01_16-23-00', type=str, help='')
-    parser.add_argument('--root', default='', type=str, help='')
-    parser.add_argument('--data_root', default='LVIS/', type=str, help='')
-    parser.add_argument('--training_ann_path', default='LVIS/lvis_v1_train.json', type=str, help='')
-    parser.add_argument('--validation_ann_path', default='LVIS/lvis_v1_val.json', type=str, help='')
+    parser.add_argument('--root', default='results', type=str, help='')
+    parser.add_argument('--data_root', default='/home/talshah/PycharmProjects/owlv2/LVIS/', type=str, help='')
+    parser.add_argument('--training_ann_path', default='/home/talshah/PycharmProjects/owlv2/LVIS/lvis_v1_train.json', type=str, help='')
+    parser.add_argument('--validation_ann_path', default='/home/talshah/PycharmProjects/owlv2/LVIS/lvis_v1_val.json', type=str, help='')
+    parser.add_argument('--dtype', default='float16', type=str, help='')
+    parser.add_argument('--device', default='cuda', type=str, help='')
+    parser.add_argument('--second_stage', default=4, type=int, help='')
+    parser.add_argument('--last_stage', default=6, type=int, help='')
     args = parser.parse_args()
     
     training_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.training_ann_path, prompt='', is_train=True)
     validation_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.validation_ann_path, prompt='', is_train=False)
-    ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, drop_last=True)
+    ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.nW, drop_last=True)
     ds_val = DataLoader(validation_dataset, batch_size=1, shuffle=False, num_workers=0)
     
     trainer = Owlv2DisTrainer(ds, ds_val, args)
