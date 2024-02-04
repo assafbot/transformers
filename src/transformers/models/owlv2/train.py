@@ -156,7 +156,7 @@ class Owlv2DisTrainer:
     def _init_student(self):
         self.student = Owlv2ForObjectDetection(config=self.config).to(self.device)
         if args.resume == 1:
-            cp = torch.load(args.resume_path + '/model.pth').state_dict()
+            cp = torch.load(args.resume_path + '/state_dict.pth')
             self.student.load_state_dict(cp, strict=True)
         else:
             self.student.load_state_dict(self.teacher.state_dict(), strict=False)
@@ -276,14 +276,7 @@ class Owlv2DisTrainer:
         for epoch in range(self.epoches):
             self.update_flags(epoch)
             self.training_single_epoch()
-            predictions = self.eval_ds()
-            self.save_prediction(predictions)
-            AP = self.calc_AP()
-            if AP >= best:
-                best = AP
-                torch.save(self.student, self.folder + '/model.pth')
-            self.f.write(str(epoch) + ',' + str(AP) + '\n')
-            self.f.flush()
+            self.evaluation(epoch=epoch, best=best)
 
     @torch.no_grad
     def eval_ds(self):
@@ -335,6 +328,26 @@ class Owlv2DisTrainer:
         results[0]["scores"] = results[0]["scores"][keep]
         results[0]["labels"] = results[0]["labels"][keep]
         return results
+    
+    def evaluation(self, epoch=0, best=0):
+        predictions = self.eval_ds()
+        self.save_prediction(predictions)
+        AP = self.calc_AP()
+        if AP >= best:
+            best = AP
+            torch.save(self.student, self.folder + '/model.pth')
+        self.f.write(str(epoch) + ',' + str(AP) + '\n')
+        self.f.flush()
+
+    def set_float16(self):
+        self.student.half()
+        self.teacher.half()
+
+    def calc_metrics(self, ann):
+        with open(ann, 'r') as file:
+            data = json.load(ann)
+        input(data)
+        predictions = self.eval_ds()
 
 
 if __name__ == "__main__":
@@ -348,7 +361,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_attention_heads', type=int, default=8, help='')
     parser.add_argument('--num_hidden_layers', type=int, default=8, help='')
     parser.add_argument('--intermediate_size', default=3072, type=int, help='')
-    parser.add_argument('--name', default='convnext_tiny', type=str, help='')
+    parser.add_argument('--name', default='vit', type=str, help='')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='')
     parser.add_argument('--epoches', default=100, type=int, help='')
     parser.add_argument('--th', default=0.1, type=float, help='')
@@ -357,12 +370,12 @@ if __name__ == "__main__":
     parser.add_argument('--w1', default=0.1, type=float, help='')
     parser.add_argument('--w2', default=1, type=float, help='')
     parser.add_argument('--alpha', default=0.025, type=float, help='')
-    parser.add_argument('--resume', default=0, type=int, help='')
-    parser.add_argument('--resume_path', default='results/results_2024-01-01_16-23-00', type=str, help='')
-    parser.add_argument('--root', default='results', type=str, help='')
-    parser.add_argument('--data_root', default='/home/talshah/PycharmProjects/owlv2/LVIS/', type=str, help='')
-    parser.add_argument('--training_ann_path', default='/home/talshah/PycharmProjects/owlv2/LVIS/lvis_v1_train.json', type=str, help='')
-    parser.add_argument('--validation_ann_path', default='/home/talshah/PycharmProjects/owlv2/LVIS/lvis_v1_val.json', type=str, help='')
+    parser.add_argument('--resume', default=1, type=int, help='')
+    parser.add_argument('--resume_path', default='/home/nfs/tals/owlv2/results/results_2024-01-28_09-48-29', type=str, help='')
+    parser.add_argument('--root', default='/home/nfs/tals/owlv2/results', type=str, help='')
+    parser.add_argument('--data_root', default='/home/nfs/tals/owlv2/LVIS/', type=str, help='')
+    parser.add_argument('--training_ann_path', default='/home/nfs/tals/owlv2/LVIS/lvis_v1_train.json', type=str, help='')
+    parser.add_argument('--validation_ann_path', default='/home/nfs/tals/owlv2/LVIS/lvis_v1_val.json', type=str, help='')
     parser.add_argument('--dtype', default='float16', type=str, help='')
     parser.add_argument('--device', default='cuda', type=str, help='')
     parser.add_argument('--second_stage', default=4, type=int, help='')
@@ -375,4 +388,5 @@ if __name__ == "__main__":
     ds_val = DataLoader(validation_dataset, batch_size=1, shuffle=False, num_workers=0)
     
     trainer = Owlv2DisTrainer(ds, ds_val, args)
-    trainer.training()
+    trainer.set_float16()
+    trainer.calc_metrics(args.validation_ann_path)
