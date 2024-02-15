@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import json
 from lvis.eval import LVISEval
 from PIL import Image
+from lvis.lvis import LVIS
 
 
 class EvaluationDataset(Dataset):
@@ -85,8 +86,8 @@ class EvaluationDataset(Dataset):
         return d_text, d_bbox, d_image_id, d_category_id
 
     def __len__(self):
-        return 180
-        # return self.Nimages
+        # return 180
+        return self.Nimages
 
     def __getitem__(self, idx):
         image_path = self.files[idx]
@@ -109,7 +110,7 @@ class EvaluationDataset(Dataset):
 
 
 class Owlv2DisTrainer:
-    def __init__(self, training_ds, validation_ds, args):
+    def __init__(self, args, training_ds=None, validation_ds=None):
         os.makedirs(args.root, exist_ok=True)
         folder = self.create_results_folder()
         self.args = args
@@ -118,7 +119,7 @@ class Owlv2DisTrainer:
         self.folder = folder
         self._set_config_file()
         self.device = args.device
-        if args.dtype == 'float16':
+        if args.dtype == 'float16': #TODO: @tals change automaticly the percision
             self.dtype = torch.float16
         else:
             self.dtype = torch.float32
@@ -140,7 +141,8 @@ class Owlv2DisTrainer:
         config.vision_config.num_hidden_layers = args.num_hidden_layers
         config.vision_config.intermediate_size = args.intermediate_size
         config.vision_config.name = args.name
-        config.vision_config.image_size = 960
+        config.vision_config.image_size = args.image_size
+        config.vision_config.patch_size = args.patch_size
         self._save_config_json()
         self.config = config
     
@@ -371,22 +373,24 @@ if __name__ == "__main__":
     parser.add_argument('--w2', default=1, type=float, help='')
     parser.add_argument('--alpha', default=0.025, type=float, help='')
     parser.add_argument('--resume', default=1, type=int, help='')
-    parser.add_argument('--resume_path', default='/home/nfs/tals/owlv2/results/results_2024-01-28_09-48-29', type=str, help='')
-    parser.add_argument('--root', default='/home/nfs/tals/owlv2/results', type=str, help='')
-    parser.add_argument('--data_root', default='/home/nfs/tals/owlv2/LVIS/', type=str, help='')
-    parser.add_argument('--training_ann_path', default='/home/nfs/tals/owlv2/LVIS/lvis_v1_train.json', type=str, help='')
-    parser.add_argument('--validation_ann_path', default='/home/nfs/tals/owlv2/LVIS/lvis_v1_val.json', type=str, help='')
+    parser.add_argument('--resume_path', default='/home/talshah/Downloads/results_2024-01-28_09-48-29', type=str, help='')
+    parser.add_argument('--root', default='/home/talshah/PycharmProjects/owlv2/results', type=str, help='')
+    parser.add_argument('--data_root', default='/home/talshah/PycharmProjects/owlv2/LVIS/', type=str, help='')
+    parser.add_argument('--training_ann_path', default='/home/talshah/PycharmProjects/owlv2/LVIS/lvis_v1_train.json', type=str, help='')
+    parser.add_argument('--validation_ann_path', default='/home/talshah/PycharmProjects/owlv2/LVIS/lvis_v1_val.json', type=str, help='')
     parser.add_argument('--dtype', default='float16', type=str, help='')
     parser.add_argument('--device', default='cuda', type=str, help='')
     parser.add_argument('--second_stage', default=4, type=int, help='')
     parser.add_argument('--last_stage', default=6, type=int, help='')
+    parser.add_argument('--image_size', default=960, type=int, help='')
+    parser.add_argument('--patch_size', default=16, type=int, help='')
     args = parser.parse_args()
     
-    training_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.training_ann_path, prompt='', is_train=True)
+    # training_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.training_ann_path, prompt='', is_train=True)
     validation_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.validation_ann_path, prompt='', is_train=False)
-    ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.nW, drop_last=True)
+    # ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.nW, drop_last=True)
     ds_val = DataLoader(validation_dataset, batch_size=1, shuffle=False, num_workers=0)
     
-    trainer = Owlv2DisTrainer(ds, ds_val, args)
+    trainer = Owlv2DisTrainer(args=args, validation_ds=ds_val)
     trainer.set_float16()
-    trainer.calc_metrics(args.validation_ann_path)
+    trainer.save_performances(is_load=True, predictions_path='results/results_2024-02-14_16-19-06/prediction.json')
