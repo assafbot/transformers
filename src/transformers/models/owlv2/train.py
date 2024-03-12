@@ -342,10 +342,40 @@ class Owlv2DistillationTrainer:
         lvis_eval = LVISEval(self.ground_truth_path, self.predictions_path, iou_type='bbox')
         lvis_eval.run()
         lvis_eval.print_results()
+        self.save_results_to_file()
 
     def set_float16(self):
         self.student.half()
         self.teacher.half()
+
+    def save_results_to_file(self):
+        template = " {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} catIds={:>3s}] = {:0.3f}"
+        for key, value in self.results.items():
+            max_dets = self.params.max_dets
+            if "AP" in key:
+                title = "Average Precision"
+                _type = "(AP)"
+            else:
+                title = "Average Recall"
+                _type = "(AR)"
+            if len(key) > 2 and key[2].isdigit():
+                iou_thr = (float(key[2:]) / 100)
+                iou = "{:0.2f}".format(iou_thr)
+            else:
+                iou = "{:0.2f}:{:0.2f}".format(
+                    self.params.iou_thrs[0], self.params.iou_thrs[-1]
+                )
+            if len(key) > 2 and key[2] in ["r", "c", "f"]:
+                cat_group_name = key[2]
+            else:
+                cat_group_name = "all"
+            if len(key) > 2 and key[2] in ["s", "m", "l"]:
+                area_rng = key[2]
+            else:
+                area_rng = "all"
+            self.f.write(template.format(title, _type, iou, area_rng, max_dets, cat_group_name, value))
+            self.f.flush()
+
 
 if __name__ == "__main__":
     import argparse
