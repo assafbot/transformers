@@ -15,7 +15,7 @@ import requests
 from tqdm import tqdm
 
 
-class OFA:
+class OFA_PhraseGrounding:
     def __init__(self, cp='checkpoints/refcocog_large_best.pt'):
         self.mean = [0.5, 0.5, 0.5]
         self.std = [0.5, 0.5, 0.5]
@@ -167,7 +167,7 @@ if __name__ == "__main__":
         iou = intersection_area / union_area if union_area > 0 else 0
         return iou
 
-    model = OFA()
+    model = OFA_PhraseGrounding()
     dataset = "refcoco"
     ref_path = "/home/talshah/Pictures/ref/"
     data = _get_annotation(ref_path, dataset)
