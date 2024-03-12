@@ -20,14 +20,9 @@ from lvis.lvis import LVIS
 
 
 class EvaluationDataset(Dataset):
-    def __init__(self, data_root, ann_path, prompt, is_train=False):
-        transform = transforms.Compose([
-                transforms.Resize((960, 960)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+    def __init__(self, data_root, ann_path, prompt, teacher_proc, transform, is_train=False):
         self.data_root = data_root
-        self.processor = Owlv2Processor.from_pretrained("google/owlv2-base-patch16-ensemble")
+        self.processor = Owlv2Processor.from_pretrained(teacher_proc) #the torchvision transform runs faster than the proccesor -> ~100msec per image
         self.lvis_cat, self.lvis_annotations = self.load_lvis_annotations(ann_path)
         self.prompt = prompt
         self.transform = transform
@@ -86,7 +81,6 @@ class EvaluationDataset(Dataset):
         return d_text, d_bbox, d_image_id, d_category_id
 
     def __len__(self):
-        # return 180
         return self.Nimages
 
     def __getitem__(self, idx):
@@ -109,7 +103,7 @@ class EvaluationDataset(Dataset):
             return inputs, gt_boxes, target_sizes, texts, image_id, category_id
 
 
-class Owlv2DisTrainer:
+class Owlv2DistillationTrainer:
     def __init__(self, args, training_ds=None, validation_ds=None):
         os.makedirs(args.root, exist_ok=True)
         folder = self.create_results_folder()
@@ -119,13 +113,15 @@ class Owlv2DisTrainer:
         self.folder = folder
         self._set_config_file()
         self.device = args.device
-        if args.dtype == 'float16': #TODO: @tals change automaticly the percision
+        if args.dtype == 'float16':
             self.dtype = torch.float16
         else:
             self.dtype = torch.float32
         self._init_teacher()
         self._init_student()
-        self.optimizer = optim.AdamW(self.student.owlv2.vision_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+        self.optimizer = optim.AdamW(self.student.owlv2.vision_model.parameters(),
+                                     lr=args.learning_rate,
+                                     weight_decay=args.weight_decay)
         self.training_ds = training_ds
         self.validation_ds = validation_ds
         self.epoches = args.epoches
@@ -134,7 +130,6 @@ class Owlv2DisTrainer:
         self.second_stage_flag = False
         self.final_stage_flag = False
         
-
     def _set_config_file(self):
         config = Owlv2Config()
         config.vision_config.num_attention_heads = args.num_attention_heads
@@ -340,17 +335,17 @@ class Owlv2DisTrainer:
             torch.save(self.student, self.folder + '/model.pth')
         self.f.write(str(epoch) + ',' + str(AP) + '\n')
         self.f.flush()
+    
+    def validation(self):
+        predictions = self.eval_ds()
+        self.save_prediction(predictions)
+        lvis_eval = LVISEval(self.ground_truth_path, self.predictions_path, iou_type='bbox')
+        lvis_eval.run()
+        lvis_eval.print_results()
 
     def set_float16(self):
         self.student.half()
         self.teacher.half()
-
-    def calc_metrics(self, ann):
-        with open(ann, 'r') as file:
-            data = json.load(ann)
-        input(data)
-        predictions = self.eval_ds()
-
 
 if __name__ == "__main__":
     import argparse
@@ -384,13 +379,36 @@ if __name__ == "__main__":
     parser.add_argument('--last_stage', default=6, type=int, help='')
     parser.add_argument('--image_size', default=960, type=int, help='')
     parser.add_argument('--patch_size', default=16, type=int, help='')
+    parser.add_argument('--mean', default=[0.485, 0.456, 0.406], type=list, help='')
+    parser.add_argument('--std', default=[0.229, 0.224, 0.225], type=list, help='')
+    parser.add_argument('--prompt', default='', type=str, help='')
+    parser.add_argument('--mode', default='validation', type=str, help='')
     args = parser.parse_args()
     
-    # training_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.training_ann_path, prompt='', is_train=True)
-    validation_dataset = EvaluationDataset(data_root= args.data_root, ann_path=args.validation_ann_path, prompt='', is_train=False)
-    # ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.nW, drop_last=True)
+    transform = transforms.Compose([
+                transforms.Resize((args.image_size, args.image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=args.mean, std=args.std)
+            ])
+    ds = None
+    if args.mode == 'training':
+        training_dataset = EvaluationDataset(data_root= args.data_root,
+                                             ann_path=args.training_ann_path,
+                                             prompt=args.prompt,
+                                             teacher_proc=args.teacher,
+                                             transform=transform,
+                                             is_train=True)
+        ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.nW, drop_last=True)        
+    validation_dataset = EvaluationDataset(data_root= args.data_root,
+                                        ann_path=args.validation_ann_path,
+                                        prompt=args.prompt,
+                                        teacher_proc=args.teacher,
+                                        transform=transform,
+                                        is_train=False)
     ds_val = DataLoader(validation_dataset, batch_size=1, shuffle=False, num_workers=0)
-    
-    trainer = Owlv2DisTrainer(args=args, validation_ds=ds_val)
-    trainer.set_float16()
-    trainer.save_performances(is_load=True, predictions_path='results/results_2024-02-14_16-19-06/prediction.json')
+    trainer = Owlv2DistillationTrainer(args=args, training_ds=ds, validation_ds=ds_val)
+    if args.mode == 'training':
+        trainer.training()
+    else:
+        trainer.set_float16()
+        trainer.validation()
